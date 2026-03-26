@@ -1,7 +1,7 @@
 ---
 name: show-note
 description: "Normalize and display markdown notes. ALWAYS use when you are about to output the full or near-full content of any .md file from the knowledge directories — regardless of how the user phrased the request."
-disable-model-invocation: false
+disable-model-invocation: true
 ---
 
 # Show Note (with math normalization)

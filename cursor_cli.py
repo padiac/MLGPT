@@ -28,9 +28,13 @@ from typing import Generator
 _ROOT = Path(__file__).resolve().parent
 
 
+def _debug_enabled() -> bool:
+    return bool(os.environ.get("MLGPT_DEBUG_NDJSON"))
+
+
 def _open_debug_log():
     """Open a debug NDJSON log file if MLGPT_DEBUG_NDJSON is set."""
-    if not os.environ.get("MLGPT_DEBUG_NDJSON"):
+    if not _debug_enabled():
         return None
     log_dir = _ROOT / "data" / "debug_ndjson"
     log_dir.mkdir(parents=True, exist_ok=True)
@@ -136,6 +140,20 @@ def create_process(
         args.extend(["--mode", mode])
     if resume_session:
         args.extend(["--resume", resume_session])
+
+    if _debug_enabled():
+        log_dir = _ROOT / "data" / "debug_ndjson"
+        log_dir.mkdir(parents=True, exist_ok=True)
+        req_path = log_dir / f"{int(time.time())}_request.txt"
+        with open(req_path, "w", encoding="utf-8") as f:
+            f.write(f"cwd: {cwd}\n")
+            f.write(f"args: {args}\n")
+            f.write(f"model: {model}\n")
+            f.write(f"mode: {mode}\n")
+            f.write(f"resume_session: {resume_session}\n")
+            f.write("--- PROMPT ---\n")
+            f.write(prompt)
+            f.write("\n")
 
     try:
         # Binary pipes + explicit UTF-8 decode: on Windows, text=True can still use GBK

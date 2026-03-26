@@ -491,6 +491,9 @@ if prompt := st.chat_input("Ask anything…"):
     _common_cwd = prompt_utils.compute_common_cwd(_dirs)
 
     enriched = prompt_utils.enrich_prompt(prompt, _dirs)
+    skills_text = prompt_utils.load_skills(_dirs)
+    if skills_text:
+        enriched = enriched + "\n\n" + skills_text
     cli_session = conv_info.get("cli_session_id") if conv_info else None
 
     existing_summary, _state_json, summary_msg_count = db.get_memory(conv_id)

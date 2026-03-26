@@ -1,6 +1,7 @@
 """Prompt building for MLGPT — working directory and doc/ hints for the agent."""
 import os
 import re
+from pathlib import Path
 
 _USAGE_EXAMPLE_RE = re.compile(
     r"(?:add|save|put|store|append)\b.*\b(?:usage\s*example|how\s*to\s*use|example)",
@@ -56,6 +57,34 @@ def enrich_prompt(question: str, dirs: list[str] | str = "") -> str:
             "Use absolute paths or paths relative to your working directory when referencing files.\n\n"
         )
     return header + question
+
+
+def load_skills(dirs: list[str] | str = "") -> str:
+    """Read `.cursor/skills/**/SKILL.md` from each knowledge directory.
+
+    Injects skill instructions into the prompt so the CLI agent follows them
+    even when its cwd is a common parent that doesn't contain the skills.
+    """
+    if isinstance(dirs, str):
+        dirs = [dirs] if dirs else []
+    parts: list[str] = []
+    seen: set[str] = set()
+    for d in dirs:
+        skills_dir = Path(d) / ".cursor" / "skills"
+        if not skills_dir.is_dir():
+            continue
+        for f in sorted(skills_dir.glob("**/SKILL.md")):
+            norm = str(f.resolve())
+            if norm in seen:
+                continue
+            seen.add(norm)
+            try:
+                text = f.read_text(encoding="utf-8").strip()
+                if text:
+                    parts.append(text)
+            except OSError:
+                continue
+    return "\n\n".join(parts)
 
 
 def is_add_usage_example(question: str) -> bool:
