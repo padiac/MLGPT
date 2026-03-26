@@ -108,17 +108,20 @@ def init_db():
         except sqlite3.OperationalError:
             pass  # migration already done
 
-        # Per-IP user settings (model, mode, mdc_tag, cwd) — persists across page refresh
+        # Per-IP user settings — persists across page refresh
         conn.executescript("""
             CREATE TABLE IF NOT EXISTS user_settings (
                 ip_address TEXT PRIMARY KEY,
                 model TEXT,
                 mode TEXT,
-                mdc_tag TEXT,
                 cwd TEXT,
                 updated_at REAL NOT NULL
             );
         """)
+        try:
+            conn.execute("ALTER TABLE user_settings DROP COLUMN mdc_tag")
+        except sqlite3.OperationalError:
+            pass
 
         # Shared usage examples — visible to all users
         conn.executescript("""
@@ -136,34 +139,68 @@ def init_db():
 
 
 def get_user_settings(ip_address: str) -> dict | None:
-    """Return saved settings for this IP, or None if none saved."""
+    """Return saved settings for this IP, or None if none saved.
+
+    The ``cwd`` field is stored as a JSON array string in the DB.
+    For backward compatibility, a plain (non-JSON) string is returned
+    wrapped in a single-element list.  Callers always receive
+    ``cwd`` as a ``list[str]``.
+    """
     with get_conn() as conn:
         row = conn.execute(
-            "SELECT model, mode, mdc_tag, cwd FROM user_settings WHERE ip_address = ?",
+            "SELECT model, mode, cwd FROM user_settings WHERE ip_address = ?",
             (ip_address,),
         ).fetchone()
-    return dict(row) if row else None
+    if not row:
+        return None
+    d = dict(row)
+    d["cwd"] = _parse_cwd(d.get("cwd", ""))
+    return d
+
+
+def _parse_cwd(raw: str) -> list[str]:
+    """Decode cwd from DB — JSON array or legacy plain path."""
+    if not raw:
+        return []
+    raw = raw.strip()
+    if raw.startswith("["):
+        try:
+            import json as _json
+            parsed = _json.loads(raw)
+            if isinstance(parsed, list):
+                return [str(p) for p in parsed if p]
+        except (ValueError, TypeError):
+            pass
+    return [raw] if raw else []
+
+
+def _encode_cwd(dirs: list[str] | str) -> str:
+    """Encode cwd list to JSON array string for DB storage."""
+    import json as _json
+    if isinstance(dirs, str):
+        dirs = [dirs] if dirs else []
+    return _json.dumps([d for d in dirs if d], ensure_ascii=False)
 
 
 def save_user_settings(ip_address: str, settings: dict) -> None:
-    """Persist settings for this IP."""
+    """Persist settings for this IP.  ``cwd`` may be a list or string."""
     now = time.time()
+    cwd_val = settings.get("cwd", "")
+    cwd_str = _encode_cwd(cwd_val) if isinstance(cwd_val, list) else _encode_cwd([cwd_val])
     with get_conn() as conn:
         conn.execute(
-            """INSERT INTO user_settings (ip_address, model, mode, mdc_tag, cwd, updated_at)
-               VALUES (?, ?, ?, ?, ?, ?)
+            """INSERT INTO user_settings (ip_address, model, mode, cwd, updated_at)
+               VALUES (?, ?, ?, ?, ?)
                ON CONFLICT(ip_address) DO UPDATE SET
                    model = excluded.model,
                    mode = excluded.mode,
-                   mdc_tag = excluded.mdc_tag,
                    cwd = excluded.cwd,
                    updated_at = excluded.updated_at""",
             (
                 ip_address,
                 settings.get("model", ""),
                 settings.get("mode", "agent"),
-                settings.get("mdc_tag", ""),
-                settings.get("cwd", ""),
+                cwd_str,
                 now,
             ),
         )

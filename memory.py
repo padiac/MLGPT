@@ -1,20 +1,7 @@
-"""Structured conversation memory for device diagnostic sessions.
-
-Three-tier memory system:
-  1. DiagnosticState  — structured task state machine (JSON in DB)
-  2. Rolling summary  — compressed older turns (text in DB)
-  3. Recent turns     — last N raw exchanges (filtered on the fly)
-
-Replaces the naive "dump all history" approach with a compact,
-structured prompt that keeps token usage roughly constant regardless
-of conversation length.
-"""
+"""Conversation memory: rolling summary + recent turns (compact prompts for long chats)."""
 from __future__ import annotations
 
-import json
 import re
-from dataclasses import dataclass, field, asdict
-from typing import Optional
 
 # ── Content filters ──────────────────────────────────────────────────────────
 
@@ -31,12 +18,11 @@ MAX_RECENT_MSG_CHARS = 3000
 
 
 def filter_content(content: str) -> str:
-    """Strip UI markers, raw log dumps, and oversized code blocks."""
+    """Strip UI markers, long timestamp runs, and oversized code blocks."""
     text = _MARKER_RE.sub("", content)
-    # Fast path: skip expensive regexes when they cannot match
     if content.count("\n") >= 5:
-        text = _LOG_LINE_BLOCK_RE.sub("\n[raw log omitted — see diagnostic_context]\n", text)
-    if len(text) >= 2500:  # _LONG_CODE_RE needs 2000+ chars inside ```...```
+        text = _LOG_LINE_BLOCK_RE.sub("\n[long line block omitted — see conversation_summary]\n", text)
+    if len(text) >= 2500:
         text = _LONG_CODE_RE.sub("```\n[large code block omitted]\n```", text)
     return text.strip()
 
@@ -58,18 +44,11 @@ def compress_message(role: str, content: str, max_chars: int = 400) -> str:
         return f"{role}: {filtered[:max_chars]}…"
 
 
-# ── Rolling summary ──────────────────────────────────────────────────────────
-
 def build_summary(
     existing_summary: str,
     turns_to_compress: list[dict],
 ) -> str:
-    """Compress evicted turns into the rolling summary.
-
-    Each turn is a dict with 'role' and 'content'.
-    The summary is capped at MAX_SUMMARY_CHARS; when exceeded, the oldest
-    portion is trimmed (decay).
-    """
+    """Compress evicted turns into the rolling summary."""
     new_parts = []
     for msg in turns_to_compress:
         role = "User" if msg["role"] == "user" else "Assistant"
@@ -87,153 +66,24 @@ def build_summary(
     return combined
 
 
-# ── Diagnostic state ─────────────────────────────────────────────────────────
-
-@dataclass
-class DiagnosticState:
-    """Structured state machine for an ongoing diagnostic session."""
-
-    device_ip: Optional[str] = None
-    device_name: Optional[str] = None
-    last_log_file: Optional[str] = None
-    last_health_file: Optional[str] = None
-    downloaded_logs: list[str] = field(default_factory=list)
-    downloaded_health: list[str] = field(default_factory=list)
-    findings: list[str] = field(default_factory=list)
-    hypotheses: list[str] = field(default_factory=list)
-    root_causes: list[str] = field(default_factory=list)
-    status: str = "idle"  # idle | investigating | resolved
-
-    # ── Serialization ────────────────────────────────────────────────────
-
-    def serialize(self) -> str:
-        return json.dumps(asdict(self), ensure_ascii=False)
-
-    @classmethod
-    def deserialize(cls, raw: str) -> DiagnosticState:
-        if not raw:
-            return cls()
-        try:
-            return cls(**json.loads(raw))
-        except (json.JSONDecodeError, TypeError):
-            return cls()
-
-    # ── Prompt rendering ─────────────────────────────────────────────────
-
-    def to_prompt_block(self) -> str:
-        if self.status == "idle":
-            return ""
-        lines = [f"Device: {self.device_name} ({self.device_ip})"]
-        if self.last_log_file:
-            lines.append(f"Last log: {self.last_log_file}")
-        if self.downloaded_logs:
-            lines.append(f"Downloaded logs: {', '.join(self.downloaded_logs[-3:])}")
-        if self.last_health_file:
-            lines.append(f"Last SystemHealth: {self.last_health_file}")
-        if self.downloaded_health:
-            lines.append(f"Downloaded health: {', '.join(self.downloaded_health[-3:])}")
-        if self.last_health_file or self.downloaded_logs:
-            lines.append(
-                'To display file data to user, use the show-file skill.'
-            )
-        if self.findings:
-            lines.append("Key findings:")
-            for f in self.findings[-5:]:
-                lines.append(f"  - {f}")
-        if self.hypotheses:
-            lines.append("Active hypotheses:")
-            for h in self.hypotheses[-3:]:
-                lines.append(f"  - {h}")
-        if self.root_causes:
-            lines.append("Confirmed root causes:")
-            for rc in self.root_causes:
-                lines.append(f"  - {rc}")
-        return "\n".join(lines)
-
-
-# ── State extraction (heuristic) ─────────────────────────────────────────────
-
-_LOG_FILE_RE = re.compile(r"(Instrument\w+_\d{4}-\d{2}-\d{2}_[\d\-]+(?:\.\d+)?\.log)")
-_HEALTH_FILE_RE = re.compile(r"((?:device/[^\s]+/)?SystemHealth_\d{4}-\d{2}-\d{2}_[\d\-]+(?:_UTC)?\.json)")
-
-_ROOT_CAUSE_RE = re.compile(
-    r"(?:Root [Cc]ause|Confirmed|Resolved)\s*[:：]\s*(.+?)(?:\n|$)"
-)
-_HYPOTHESIS_RE = re.compile(
-    r"(?:Hypothesis|Possible cause|Suspect|May be caused by|Likely)\s*[:：]\s*(.+?)(?:\n|$)",
-    re.IGNORECASE,
-)
-_FINDING_RE = re.compile(
-    r"^[ \t]*[-•]\s+\*\*(.+?)\*\*",
-    re.MULTILINE,
-)
-
-
-def extract_state_updates(
-    response: str,
-    state: DiagnosticState,
-) -> DiagnosticState:
-    """Parse the assistant response and update the diagnostic state."""
-
-    for m in _LOG_FILE_RE.finditer(response):
-        log_name = m.group(1)
-        if log_name not in state.downloaded_logs:
-            state.downloaded_logs.append(log_name)
-            state.last_log_file = log_name
-
-    for m in _HEALTH_FILE_RE.finditer(response):
-        health_name = m.group(1)
-        if health_name not in state.downloaded_health:
-            state.downloaded_health.append(health_name)
-            state.last_health_file = health_name
-
-    for m in _ROOT_CAUSE_RE.finditer(response):
-        rc = m.group(1).strip().rstrip(".")
-        if 20 < len(rc) < 200 and rc not in state.root_causes:
-            state.root_causes.append(rc)
-
-    for m in _HYPOTHESIS_RE.finditer(response):
-        hyp = m.group(1).strip().rstrip(".")
-        if 10 < len(hyp) < 200 and hyp not in state.hypotheses:
-            state.hypotheses.append(hyp)
-
-    for m in _FINDING_RE.finditer(response):
-        finding = m.group(1).strip().rstrip(".")
-        if 10 < len(finding) < 200 and finding not in state.findings:
-            state.findings.append(finding)
-
-    if state.device_ip and state.status == "idle":
-        state.status = "investigating"
-    if state.root_causes and state.status == "investigating":
-        state.status = "resolved"
-
-    return state
-
-
-# ── Prompt builder ───────────────────────────────────────────────────────────
-
 def build_prompt(
     current_question: str,
     all_messages: list[dict],
-    diagnostic_state: DiagnosticState,
     existing_summary: str,
-    is_device_query: bool,
+    is_continuity_query: bool,
     summary_msg_count: int = 0,
 ) -> tuple[str, str, int]:
-    """Assemble a structured prompt from memory layers.
+    """Assemble prompt from rolling summary + recent turns.
 
     Returns (prompt_text, updated_summary, new_summary_msg_count).
-    Uses incremental summary: only compresses newly evicted turns, O(1) per turn.
     """
 
-    # --- Partition into summary-zone and recent-zone ---
-    recent_count = RECENT_TURN_COUNT * 2  # N exchanges = 2N messages
+    recent_count = RECENT_TURN_COUNT * 2
     total = len(all_messages)
     if total > recent_count:
         older = all_messages[:-recent_count]
         recent = all_messages[-recent_count:]
         prev_older_count = max(0, summary_msg_count - recent_count)
-        # Only compress newly evicted turns (1–2 per exchange), not entire history
         newly_evicted = older[prev_older_count:]
         if newly_evicted:
             updated_summary = build_summary(existing_summary, newly_evicted)
@@ -245,29 +95,20 @@ def build_prompt(
         updated_summary = existing_summary or ""
         new_summary_msg_count = summary_msg_count
 
-    # --- Assemble blocks ---
     blocks: list[str] = [current_question]
 
-    # Diagnostic state
-    state_block = diagnostic_state.to_prompt_block()
-    if state_block:
-        blocks.append(f"<diagnostic_context>\n{state_block}\n</diagnostic_context>")
-
-    # Behavior note
-    if is_device_query:
+    if is_continuity_query:
         blocks.append(
-            "<note>Use diagnostic_context and conversation_summary to avoid "
-            "re-downloading logs already analyzed. Reuse existing findings. "
-            "If the user asks for fresh logs, re-download.</note>"
+            "<note>Use conversation_summary to avoid repeating work already done "
+            "(e.g. files already read in the knowledge folder). Reuse prior answers unless the user "
+            "asks for a fresh pass.</note>"
         )
 
-    # Summary of older turns
     if updated_summary:
         blocks.append(
             f"<conversation_summary>\n{updated_summary}\n</conversation_summary>"
         )
 
-    # Recent raw turns (filtered)
     if recent:
         recent_lines: list[str] = []
         for msg in recent:

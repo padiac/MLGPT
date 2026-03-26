@@ -13,17 +13,13 @@ import streamlit as st
 ROOT = Path(__file__).resolve().parent
 
 
-
 _IMAGE_MARKER = "<!-- ATTACHED_IMAGES:"
 _FILE_MARKER = "<!-- ATTACHED_FILES:"
 _IMAGE_EXT_RE = re.compile(r'[\w.\-]+\.(?:png|jpg|jpeg|svg)', re.IGNORECASE)
 _PLOTLY_MARKER = "<!-- PLOTLY_CHART:"
 _PLOTLY_HTML_MARKER = "<!-- PLOTLY_HTML:"
 
-# Explicit marker: <!-- PLOTLY: path/to/file.json -->
 _PLOTLY_MARKER_RE = re.compile(r'<!--\s*PLOTLY\s*:\s*([^\s>]+)\s*-->', re.IGNORECASE)
-# Generic paths: path/to/file.json or path\to\file.html (forward or backslash)
-# Allow preceding: space, newline, " ' ( [ ` > : (markdown/code context)
 _PLOTLY_PATH_RE = re.compile(
     r'(?:^|[\s"\'(\[`>:])((?:\./|[a-zA-Z0-9_\-]+[/\\])[a-zA-Z0-9_./\\\-]*\.(?:json|html))',
     re.IGNORECASE,
@@ -36,25 +32,20 @@ def find_new_images(cwd: str, since: float, response_text: str) -> list[str]:
     if not cwd or not os.path.isdir(cwd):
         return found
     seen: set[str] = set()
-
     for ext in ("*.png", "*.jpg", "*.jpeg", "*.svg"):
         for p in glob.glob(os.path.join(cwd, "**", ext), recursive=True):
             ap = os.path.abspath(p)
             if ap not in seen and os.path.getmtime(p) > since:
                 seen.add(ap)
                 found.append(ap)
-
     for name in _IMAGE_EXT_RE.findall(response_text):
         for p in glob.glob(os.path.join(cwd, "**", name), recursive=True):
             ap = os.path.abspath(p)
             if ap not in seen:
                 seen.add(ap)
                 found.append(ap)
-
     found.sort(key=lambda p: os.path.getmtime(p))
     return found
-
-
 
 
 def attach_images(content: str, image_paths: list[str]) -> str:
@@ -91,7 +82,6 @@ def split_images(content: str) -> tuple[str, list[str]]:
 
 
 def _load_plotly_from_json(path: str):
-    """Load Plotly figure from JSON file. Returns fig or None."""
     try:
         import plotly.io as pio
         return pio.read_json(path)
@@ -100,7 +90,6 @@ def _load_plotly_from_json(path: str):
 
 
 def _load_plotly_from_html(path: str):
-    """Load Plotly figure from HTML file (extract embedded JSON). Returns fig or None."""
     try:
         import plotly.io as pio
         html = Path(path).read_text(encoding="utf-8", errors="ignore")
@@ -114,29 +103,15 @@ def _load_plotly_from_html(path: str):
         return None
 
 
-def try_interactive_plot(cwd: str, response_text: str, since: float = 0):
-    """
-    Find Plotly figures via response text paths OR newly created JSON files.
-    Returns (cache_path, fig, html_path).
-    - If fig: use st.plotly_chart(fig)
-    - Elif html_path: embed HTML with st.components.v1.html() (fallback when parse fails)
-    """
+def try_interactive_plot(cwd: str, response_text: str):
+    """Find Plotly figures via paths in response text. Returns (cache_path, fig, html_path)."""
     if not cwd or not os.path.isdir(cwd):
         return None, None, None
-
     candidates = []
     for m in _PLOTLY_MARKER_RE.finditer(response_text):
         candidates.append(m.group(1).strip())
     for m in _PLOTLY_PATH_RE.finditer(response_text):
         candidates.append(m.group(1).strip().strip("`"))
-
-    if since:
-        for p in glob.glob(os.path.join(cwd, "device", "*", "log", "*.json"), recursive=False):
-            if os.path.getmtime(p) > since:
-                rel = os.path.relpath(p, cwd)
-                if rel not in candidates:
-                    candidates.append(rel)
-
     for rel_path in candidates:
         if not rel_path or ".." in rel_path:
             continue
@@ -144,7 +119,6 @@ def try_interactive_plot(cwd: str, response_text: str, since: float = 0):
         full_path = os.path.normpath(os.path.join(cwd, rel_path_norm))
         if not os.path.isfile(full_path):
             continue
-
         if full_path.lower().endswith(".json"):
             fig = _load_plotly_from_json(full_path)
             if fig is not None:
@@ -193,7 +167,6 @@ def split_plotly(content: str) -> tuple[str, str | None]:
 
 @lru_cache(maxsize=128)
 def _load_plotly_from_cache(path: str, mtime: float):
-    """Load Plotly figure from cache file. Cached by (path, mtime) to avoid re-parsing on rerun."""
     if not path or not os.path.isfile(path):
         return None
     try:
@@ -226,9 +199,35 @@ def _strip_markers(text: str) -> str:
     return result
 
 
+# ── Minimal math preprocessing for st.markdown (KaTeX) ───────────────────────
+
+_CODE_FENCE_RE = re.compile(r"(```[\s\S]*?```)")
+_INVISIBLE = frozenset("\u200b\u200c\u200d\ufeff")
+
+
+def _normalize_math(text: str) -> str:
+    r"""Lightweight fixes so st.markdown's KaTeX renders math correctly.
+
+    Only two transformations (applied outside code fences):
+      \(...\)  →  $...$
+      \[...\]  →  $$...$$
+    Plus strip zero-width chars that sometimes appear in model output.
+    """
+    parts = _CODE_FENCE_RE.split(text)
+    for i in range(0, len(parts), 2):
+        s = parts[i]
+        s = "".join(c for c in s if c not in _INVISIBLE)
+        s = re.sub(r"\\\((.+?)\\\)", r"$\1$", s)
+        s = re.sub(r"\\\[(.+?)\\\]", r"$$\1$$", s)
+        parts[i] = s
+    return "".join(parts)
+
+
 def render_message(content: str) -> None:
-    """Render a chat message (markdown, images, Plotly charts, config JSON) to Streamlit."""
-    st.markdown(_strip_markers(content))
+    """Render a chat message to Streamlit (native markdown + KaTeX math)."""
+    body = _strip_markers(content)
+    body = _normalize_math(body)
+    st.markdown(body)
 
     if _PLOTLY_MARKER in content:
         _, cache_path = split_plotly(content)
@@ -256,7 +255,6 @@ def render_message(content: str) -> None:
         _, file_paths = split_files(content)
         _render_files(file_paths)
 
-    # Backward compat: old messages may have ATTACHED_CONFIG marker
     _OLD_CONFIG_MARKER = "<!-- ATTACHED_CONFIG:"
     if _OLD_CONFIG_MARKER in content:
         idx = content.index(_OLD_CONFIG_MARKER)
@@ -279,7 +277,6 @@ _EXT_LANG = {
 
 
 def lang_for_file(name: str) -> str:
-    """Return syntax highlight language for a filename."""
     lower = name.lower()
     for ext, lang in _EXT_LANG.items():
         if lower.endswith(ext):
@@ -290,17 +287,10 @@ def lang_for_file(name: str) -> str:
 
 
 def _is_config_file(path: str) -> bool:
-    """True if path is a device config/SystemHealth JSON (often long, collapse by default)."""
-    p = path.replace("\\", "/").lower()
-    name = os.path.basename(path).lower()
-    return (
-        "/config/" in p or "/systemhealth/" in p
-        or name in ("instrumentparameters.json", "systemhealthparameters.json", "networksettings.json")
-    )
+    return False
 
 
 def _render_files(paths: list[str]) -> None:
-    """Render arbitrary files (JSON or text) in expandable sections."""
     for path in paths:
         if not os.path.isfile(path):
             continue

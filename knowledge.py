@@ -21,8 +21,8 @@ CRITICAL: Output the FULL Markdown content directly in your response.
 - Output ONLY the document content — no "I have written..." or file paths.
 
 Requirements:
-- Extract key conclusions, root causes, and steps (do not copy verbatim)
-- Clear structure: background, analysis, key steps
+- Extract key conclusions and steps (do not copy verbatim)
+- Clear structure: background, analysis, key takeaways
 - Suitable for future reference
 
 Conversation:

@@ -1,12 +1,12 @@
 [Unit]
-Description=Instrument GPT (Streamlit)
+Description=MLGPT (Streamlit)
 Documentation=file://{{REPO}}/README.md
 After=network-online.target
 Wants=network-online.target
 
 [Service]
 Type=simple
-# Optional: create {{REPO}}/.env with e.g. INSTRUMENT_CWD=/path/to/Instrument
+# Optional: create {{REPO}}/.env with e.g. MLGPT_CWD=/path/to/your/repo
 EnvironmentFile=-{{REPO}}/.env
 ExecStart=/usr/bin/bash {{REPO}}/scripts/run-streamlit-service.sh
 Restart=on-failure

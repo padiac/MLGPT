@@ -2,3 +2,4 @@ cursor_chat/
 __pycache__/
 data/
 .env
+doc/

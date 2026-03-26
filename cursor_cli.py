@@ -10,10 +10,10 @@ Stream-json event types (NDJSON, one JSON object per line):
   type=result      — final summary with duration_ms
 
 To fix "agent not found" when PATH differs (e.g. Streamlit started from IDE):
-  Set INSTRUMENT_AGENT_PATH to the full path to the agent executable.
+  Set MLGPT_AGENT_PATH to the full path to the agent executable.
 
 Debug logging:
-  Set env INSTRUMENT_DEBUG_NDJSON=1 to write raw NDJSON lines to
+  Set env MLGPT_DEBUG_NDJSON=1 to write raw NDJSON lines to
   data/debug_ndjson/<timestamp>.jsonl for protocol analysis.
 """
 import json
@@ -29,8 +29,8 @@ _ROOT = Path(__file__).resolve().parent
 
 
 def _open_debug_log():
-    """Open a debug NDJSON log file if INSTRUMENT_DEBUG_NDJSON is set."""
-    if not os.environ.get("INSTRUMENT_DEBUG_NDJSON"):
+    """Open a debug NDJSON log file if MLGPT_DEBUG_NDJSON is set."""
+    if not os.environ.get("MLGPT_DEBUG_NDJSON"):
         return None
     log_dir = _ROOT / "data" / "debug_ndjson"
     log_dir.mkdir(parents=True, exist_ok=True)
@@ -44,7 +44,11 @@ def get_available_models() -> list[tuple[str, str]]:
     try:
         result = subprocess.run(
             [agent, "models"],
-            capture_output=True, text=True, timeout=10,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=10,
         )
         pairs: list[tuple[str, str]] = []
         for line in result.stdout.splitlines():
@@ -61,7 +65,7 @@ def get_available_models() -> list[tuple[str, str]]:
 
 def _find_agent_cmd() -> str:
     # Explicit path wins (for when Streamlit's PATH doesn't include agent)
-    explicit = os.environ.get("INSTRUMENT_AGENT_PATH")
+    explicit = os.environ.get("MLGPT_AGENT_PATH")
     if explicit:
         p = Path(explicit)
         if p.is_file():
@@ -101,7 +105,7 @@ _NOT_FOUND_MSG = (
     "Cursor CLI (`agent`) not found.\n\n"
     "If you already installed and logged in in another terminal, set the full path "
     "so this app can find it (e.g. in the same terminal before running Streamlit):\n\n"
-    "**PowerShell:** `$env:INSTRUMENT_AGENT_PATH = \"C:\\path\\to\\agent.exe\"`\n\n"
+    "**PowerShell:** `$env:MLGPT_AGENT_PATH = \"C:\\path\\to\\agent.exe\"`\n\n"
     "To find where `agent` is: in a terminal where `agent` works, run "
     "`(Get-Command agent).Source` (PowerShell) or `where agent` (CMD).\n\n"
     "Otherwise install: `irm 'https://cursor.com/install?win32=true' | iex` then `agent login`."
@@ -134,18 +138,17 @@ def create_process(
         args.extend(["--resume", resume_session])
 
     try:
+        # Binary pipes + explicit UTF-8 decode: on Windows, text=True can still use GBK
+        # for stderr reader threads, causing UnicodeDecodeError on UTF-8 CLI output.
         process = subprocess.Popen(
             args,
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-            bufsize=1,
+            bufsize=0,
             cwd=str(cwd) if cwd else None,
         )
-        process.stdin.write(prompt)
+        process.stdin.write(prompt.encode("utf-8"))
         process.stdin.close()
         return process, None
     except FileNotFoundError:
@@ -191,7 +194,7 @@ def iter_events(
     dbg = _open_debug_log()
     try:
         for raw_line in process.stdout:
-            line = raw_line.strip()
+            line = raw_line.decode("utf-8", errors="replace").strip()
             if not line:
                 continue
             if dbg:
@@ -240,21 +243,17 @@ def iter_events(
                 tc = data.get("tool_call", {})
                 for path in _extract_show_file_paths(tc):
                     yield ("show_file", path)
-                read_show = _extract_read_device_path(tc)
-                if read_show:
-                    yield ("show_file", read_show)
-                plotly_path = _extract_plotly_json_path(tc)
-                if plotly_path:
-                    yield ("plotly_json", plotly_path)
                 desc = _describe_tool_call(tc)
                 if desc:
                     yield ("tool", desc)
 
         process.wait()
         if process.returncode and process.returncode != 0:
-            stderr = process.stderr.read().strip()
-            if stderr:
-                yield ("error", stderr)
+            err_raw = process.stderr.read()
+            if err_raw:
+                stderr = err_raw.decode("utf-8", errors="replace").strip()
+                if stderr:
+                    yield ("error", stderr)
 
     except Exception as exc:
         yield ("error", str(exc))
@@ -299,65 +298,6 @@ def _extract_show_file_paths(tc: dict) -> list[str]:
         return []
     raw = m.group(1).strip()
     return [p.strip().strip("'\"") for p in raw.split() if p.strip()]
-
-
-# ---------------------------------------------------------------------------
-# Detect readToolCall for device config/health files → emit show_file event
-# ---------------------------------------------------------------------------
-_DEVICE_DATA_RE = re.compile(
-    r'device/[^/]+/(config|SystemHealth)/.*\.json$', re.IGNORECASE,
-)
-
-
-def _extract_read_device_path(tc: dict) -> str | None:
-    """If a readToolCall reads a device config/SystemHealth JSON, return path."""
-    if "readToolCall" not in tc:
-        return None
-    path = tc["readToolCall"].get("args", {}).get("path", "")
-    if _DEVICE_DATA_RE.search(path):
-        return path
-    return None
-
-
-# ---------------------------------------------------------------------------
-# Detect dataAnalysisPlotly.py calls → predict output JSON path
-# ---------------------------------------------------------------------------
-_PLOTLY_SCRIPT_RE = re.compile(r'dataAnalysisPlotly\.py\s+(.+)')
-
-
-def _extract_plotly_json_path(tc: dict) -> str | None:
-    """Predict the JSON output path from a dataAnalysisPlotly.py shell command."""
-    if "shellToolCall" not in tc:
-        return None
-    cmd = tc["shellToolCall"].get("args", {}).get("command", "")
-    m = _PLOTLY_SCRIPT_RE.search(cmd)
-    if not m:
-        return None
-    args_str = m.group(1).strip()
-    parts = args_str.split()
-    log_file = None
-    class_name = "PIDController"
-    function_name = "PowerConsumptionByPercentage"
-    i = 0
-    while i < len(parts):
-        if parts[i] == "--class_name" and i + 1 < len(parts):
-            class_name = parts[i + 1]
-            i += 2
-        elif parts[i] == "--function_name" and i + 1 < len(parts):
-            function_name = parts[i + 1]
-            i += 2
-        elif parts[i].startswith("--"):
-            i += 1
-        elif log_file is None:
-            log_file = parts[i].strip("'\"")
-            i += 1
-        else:
-            i += 1
-    if not log_file:
-        return None
-    import os
-    log_dir = os.path.dirname(log_file) if os.path.dirname(log_file) else "."
-    return os.path.join(log_dir, f"{class_name}_{function_name}.json")
 
 
 # ---------------------------------------------------------------------------

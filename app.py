@@ -1,13 +1,13 @@
 """
-Instrument GPT — Chat-style Q&A powered by the Cursor Agent CLI.
+MLGPT — Chat-style Q&A powered by the Cursor Agent CLI.
 
 UI layout (ChatGPT-like):
   Left sidebar  — conversation list per IP, new-chat button, settings
   Right main    — current conversation messages with streaming responses
 
-Default working directory for Cursor CLI:
-  - Set env INSTRUMENT_CWD at run time to override (e.g. your target repo).
-  - Otherwise defaults to this app's directory (ROOT).
+Knowledge directories:
+  - Set env MLGPT_CWD (pipe-separated for multiple dirs), or default to `doc/` if present, else app root.
+  - Multiple knowledge directories are supported; the Cursor CLI cwd is set to their common parent.
 """
 import html
 import json
@@ -28,22 +28,20 @@ import prompt_utils
 import media_utils
 from ui_styles import SIDEBAR_AND_MAIN_CSS
 
-# Default cwd: env INSTRUMENT_CWD at start, else auto-detect
-DEFAULT_CWD = os.environ.get("INSTRUMENT_CWD")
-if not DEFAULT_CWD or not Path(DEFAULT_CWD).exists():
-    _candidate = Path(__file__).resolve().parent.parent / "Instrument"
-    if _candidate.is_dir():
-        DEFAULT_CWD = str(_candidate)
-    elif os.name == "nt":
-        DEFAULT_CWD = r"C:\Users\XingfuDu\Desktop\Instrument"
-    else:
-        DEFAULT_CWD = str(Path.home() / "GPT" / "Instrument")
+# Default knowledge directories: MLGPT_CWD (pipe-separated), else `doc/` if present, else app root
+def _default_dirs() -> list[str]:
+    env = os.environ.get("MLGPT_CWD", "")
+    if env:
+        return [d.strip() for d in env.split("|") if d.strip() and Path(d.strip()).exists()]
+    _doc = ROOT / "doc"
+    return [str(_doc)] if _doc.is_dir() else [str(ROOT)]
+
+DEFAULT_DIRS: list[str] = _default_dirs()
 
 DEFAULT_MODEL = "composer-2"
 # Older app versions defaulted to Opus; DB still has that string — migrate to current default.
 LEGACY_DEFAULT_MODELS = ("claude-4.6-opus-high-thinking",)
 DEFAULT_MODE = "agent"
-DEFAULT_MDC_TAG = "@log-download-and-debug.mdc"
 
 db.init_db()
 
@@ -95,7 +93,7 @@ if "_streaming_proc" in st.session_state:
 
 # ── Page config & CSS ────────────────────────────────────────────────────────
 
-st.set_page_config(page_title="Instrument GPT", page_icon="🔬", layout="wide", initial_sidebar_state="expanded")
+st.set_page_config(page_title="MLGPT", page_icon="📚", layout="wide", initial_sidebar_state="expanded")
 st.markdown(SIDEBAR_AND_MAIN_CSS, unsafe_allow_html=True)
 
 # ── Session state defaults ───────────────────────────────────────────────────
@@ -129,12 +127,15 @@ if "settings" not in st.session_state:
     defaults = {
         "model": DEFAULT_MODEL,
         "mode": DEFAULT_MODE,
-        "mdc_tag": DEFAULT_MDC_TAG,
-        "cwd": DEFAULT_CWD,
+        "cwd": list(DEFAULT_DIRS),
     }
     saved = db.get_user_settings(client_ip)
     if saved:
-        merged = {k: (saved.get(k) or defaults[k]) for k in defaults}
+        merged = {
+            "model": saved.get("model") or defaults["model"],
+            "mode": saved.get("mode") or defaults["mode"],
+            "cwd": saved.get("cwd") or defaults["cwd"],
+        }
         if merged["model"] in LEGACY_DEFAULT_MODELS:
             merged["model"] = DEFAULT_MODEL
             db.save_user_settings(client_ip, merged)
@@ -154,7 +155,7 @@ if _share_mode:
 # ── Sidebar ──────────────────────────────────────────────────────────────────
 
 with st.sidebar:
-    st.markdown("### 🔬 Instrument GPT")
+    st.markdown("### 📚 MLGPT")
 
     if st.button("＋  New Chat", key="btn_new_chat", use_container_width=True):
         st.session_state.current_conv = None
@@ -215,73 +216,43 @@ with st.sidebar:
 
     with st.expander("📖  How to Use"):
         st.markdown("""
-**Instrument GPT** helps you download instrument logs, analyze errors, plot data, and debug with your codebase — all through natural conversation.
+**MLGPT** answers from files under your **Knowledge Directories** (PDFs, Markdown, notes, blogs, etc.). It does **not** use the rest of the repository as a knowledge base.
+
+You can add **multiple directories** — e.g. a `doc/` folder with papers AND a blog folder with Markdown posts.
 
 ---
 
-#### Supported Devices
+#### Quick start — example prompts
 
-| Device | IP |
-|--------|-----|
-| zspr 050 | 10.1.1.85 |
-| zspr 051 | 10.1.1.46 |
-| zspr 052 | 10.1.1.80 |
-| zspr 053 | 10.1.1.91 |
-| zspr 054 | 10.1.1.93 |
-| zspr 055 | 10.1.1.108 |
+**Summarize or compare papers**:
+> `Summarize the main ideas in Diffusion/2006.11239v2.pdf`
 
-You can refer to a device by **name** (e.g. `zspr 052`, `52`, `052`) or by **IP** (e.g. `10.1.1.80`). The system resolves device names to IPs automatically.
+> `Compare score-based diffusion vs DDPM using the PDFs here`
 
----
-
-#### Quick Start — Example Prompts
-
-**Analyze an error** (specify device + describe the problem):
-> `zspr 052 Door open timeout error, what happened?`
-
-> `52 LED not blinking, can you check the logs?`
-
-**Check a specific log session**:
-> `52 check InstrumentDebug_2026-02-13_00-44-28.1.log for temp drop`
-
-**Paste log content for analysis** (include device):
-> `zspr 052 [2026-02-13 05:04:52.782][debug] temp 61.9, next line temp 29.4 — why the sudden drop?`
-
-**Plot PID / temperature control data**:
-> `52 plot temp control`
-
-> `50 plot PID`
-
-**Download all logs from a device**:
-> `52 download all logs`
-
-**General questions (no device needed)**:
-> `What causes a Door timeout error?`
-
-> `How does the DoorController handle initialization?`
+**Retrieval-style**:
+> `What do these notes say about classifier-free guidance?`
 
 ---
 
 #### Save & Share
 
-- **💾 Save** — click the save button on any assistant answer to generate a summarized knowledge document (saved to `liked_answers/`). Useful for future reference.
-- **🔗 Share** — click the link button to copy a shareable URL. Anyone with the link can view the conversation up to that answer (read-only).
+- **💾 Save** — click the save button on any assistant answer to generate a summarized knowledge document (saved to `liked_answers/`).
+- **🔗 Share** — click the link button to copy a shareable URL (read-only view up to that answer).
 
 ---
 
 #### Tips
-- **Include the device** (name or IP) in your question to trigger automatic log download and analysis.
-- **Without a device**, the assistant answers from general knowledge and the codebase only (no download).
-- After downloading, the assistant analyzes the logs, cross-references your source code, and reports root cause, timeline, and fix suggestions.
-- **Interactive charts**: When you ask to plot data, the chart supports zoom, pan, and hover — use your mouse to explore.
-- **Memory**: The assistant remembers what was downloaded and analyzed earlier in the conversation. No need to re-specify the device or re-download logs unless you want fresh data.
-- **Settings** (below): Change model, mode, MDC tag, and working directory. Settings are saved per user.
+
+- Set **Knowledge Directories** — one path per line. Default tries `…/MLGPT/doc` if it exists.
+- Multiple dirs are supported: the agent sees all of them as its knowledge base.
+- **Memory**: Earlier turns are summarized so long chats stay usable; the assistant should reuse prior file reads when relevant.
+- **Settings** persist per client IP.
 
 ---
 
-#### 💡 Add Your Own Example
+#### Add your own example
 
-In any conversation, type **"add this to usage example"** and the entire conversation will be saved here for everyone to see.
+In any conversation, type **"add this to usage example"** to save the thread here for others to see.
 """)
 
     with st.expander("⚙  Settings"):
@@ -305,16 +276,49 @@ In any conversation, type **"add this to usage example"** and the entire convers
                 st.session_state.settings["mode"]
             ),
         )
-        st.session_state.settings["mdc_tag"] = st.text_input(
-            "MDC Tag",
-            value=st.session_state.settings["mdc_tag"],
-            help="Prepended to every question for log-download guidance",
+        st.markdown("**Knowledge directories**")
+        st.caption(
+            "Each folder is part of the knowledge base. The Cursor agent cwd is the common parent of these paths."
         )
-        st.session_state.settings["cwd"] = st.text_input(
-            "Working Directory",
-            value=st.session_state.settings["cwd"],
-            help="Cursor CLI cwd (repo to operate on). Default at start: INSTRUMENT_CWD or app dir.",
-        )
+
+        _cur_dirs: list[str] = st.session_state.settings.get("cwd", [])
+        if isinstance(_cur_dirs, str):
+            _cur_dirs = [_cur_dirs] if _cur_dirs else []
+        if "_kw_dirs_n" not in st.session_state:
+            _n0 = max(len(_cur_dirs), 1)
+            st.session_state._kw_dirs_n = _n0
+            for _i in range(_n0):
+                st.session_state[f"kw_dir_{_i}"] = _cur_dirs[_i] if _i < len(_cur_dirs) else ""
+
+        for _i in range(st.session_state._kw_dirs_n):
+            st.text_input(
+                f"Directory {_i + 1}",
+                key=f"kw_dir_{_i}",
+                placeholder=r"e.g. C:\Users\you\MLGPT\doc",
+            )
+
+        _add_col, _rem_col = st.columns(2)
+        with _add_col:
+            if st.button("＋ Add directory", key="kw_dirs_add", use_container_width=True):
+                _idx = st.session_state._kw_dirs_n
+                st.session_state._kw_dirs_n += 1
+                st.session_state[f"kw_dir_{_idx}"] = ""
+                st.rerun()
+        with _rem_col:
+            if st.session_state._kw_dirs_n > 1 and st.button(
+                "Remove last", key="kw_dirs_remove", use_container_width=True
+            ):
+                _last = st.session_state._kw_dirs_n - 1
+                st.session_state._kw_dirs_n -= 1
+                if f"kw_dir_{_last}" in st.session_state:
+                    del st.session_state[f"kw_dir_{_last}"]
+                st.rerun()
+
+        st.session_state.settings["cwd"] = [
+            st.session_state.get(f"kw_dir_{_i}", "").strip()
+            for _i in range(st.session_state._kw_dirs_n)
+            if st.session_state.get(f"kw_dir_{_i}", "").strip()
+        ]
         # Persist settings to DB so they survive page refresh
         db.save_user_settings(client_ip, st.session_state.settings)
 
@@ -359,7 +363,7 @@ if not conv_id:
     st.markdown(
         f'<div class="welcome-card">'
         f'<p class="greeting">Hello User,   <span class="ip">{safe_ip}</span></p>'
-        f'<p class="sub">Ask questions about instruments, logs, and debugging.<br>'
+        f'<p class="sub">Ask about materials in your knowledge base folder (papers, notes).<br>'
         f'Start a new conversation or pick one from the sidebar.</p>'
         f'</div>',
         unsafe_allow_html=True,
@@ -367,7 +371,10 @@ if not conv_id:
 
 # Render existing messages with per-answer save
 # Use fragment to auto-refresh save status when summarization is in progress
-cwd = st.session_state.settings.get("cwd", "")
+_cwd_dirs = st.session_state.settings.get("cwd", [])
+if isinstance(_cwd_dirs, str):
+    _cwd_dirs = [_cwd_dirs] if _cwd_dirs else []
+cwd = prompt_utils.compute_common_cwd(_cwd_dirs) if _cwd_dirs else ""
 _has_pending = False
 if conv_id:
     _liked = db.get_liked_entries_for_conversation(conv_id)
@@ -478,43 +485,34 @@ if prompt := st.chat_input("Ask anything…"):
     with st.chat_message("user"):
         st.markdown(prompt)
 
-    # Build enriched prompt (always include context so Agent has mdc_tag, cwd, device)
-    enriched = prompt_utils.enrich_prompt(prompt, settings.get("mdc_tag", ""), settings.get("cwd", ""))
+    _dirs: list[str] = settings.get("cwd", [])
+    if isinstance(_dirs, str):
+        _dirs = [_dirs] if _dirs else []
+    _common_cwd = prompt_utils.compute_common_cwd(_dirs)
+
+    enriched = prompt_utils.enrich_prompt(prompt, _dirs)
     cli_session = conv_info.get("cli_session_id") if conv_info else None
 
-    # Load memory and build structured context
-    existing_summary, state_json, summary_msg_count = db.get_memory(conv_id)
-    diag_state = memory.DiagnosticState.deserialize(state_json)
-
-    _cwd = settings.get("cwd", "")
-    ip_result = prompt_utils.extract_ip(prompt)
-    if ip_result:
-        diag_state.device_ip = ip_result[0]
-        diag_state.device_name = f"zspr {ip_result[1]}"
+    existing_summary, _state_json, summary_msg_count = db.get_memory(conv_id)
 
     if messages:
         enriched, updated_summary, new_summary_msg_count = memory.build_prompt(
             current_question=enriched,
             all_messages=messages,
-            diagnostic_state=diag_state,
             existing_summary=existing_summary,
-            is_device_query=prompt_utils.has_device(prompt),
+            is_continuity_query=len(messages) > 0,
             summary_msg_count=summary_msg_count,
         )
     else:
         updated_summary = existing_summary
         new_summary_msg_count = summary_msg_count
 
-    # Debug: show the actual prompt sent to CLI
-    with st.expander("Debug: actual prompt sent", expanded=False):
-        st.code(enriched, language="markdown")
-
     request_start_time = time.time()
 
-    # Start the CLI process
+    # Start the CLI process (cwd = common parent of all knowledge dirs)
     process, proc_err = cursor_cli.create_process(
         prompt=enriched,
-        cwd=settings.get("cwd"),
+        cwd=_common_cwd or None,
         model=settings.get("model") or None,
         mode=settings.get("mode", "agent"),
         resume_session=cli_session,
@@ -538,7 +536,6 @@ if prompt := st.chat_input("Ask anything…"):
         stop_area = st.empty()
         full_response = ""
         show_file_paths: list[str] = []
-        plotly_json_paths: list[str] = []
 
         stop_area.button("⏹ Stop", key="stop_gen", type="secondary")
 
@@ -555,9 +552,6 @@ if prompt := st.chat_input("Ask anything…"):
 
             elif evt_type == "show_file":
                 show_file_paths.append(payload)
-
-            elif evt_type == "plotly_json":
-                plotly_json_paths.append(payload)
 
             elif evt_type == "tool":
                 tool_area.markdown(
@@ -576,13 +570,11 @@ if prompt := st.chat_input("Ask anything…"):
                 stop_area.empty()
                 response_area.markdown(full_response or "_No response received._")
 
-        _cwd = settings.get("cwd", "")
-
         # show_file events: render raw content directly (deduplicate paths)
         _seen_show: set[str] = set()
         deduped_show_paths: list[str] = []
         for p in show_file_paths:
-            norm = os.path.normpath(os.path.join(_cwd, p)) if not os.path.isabs(p) else os.path.normpath(p)
+            norm = os.path.normpath(os.path.join(_common_cwd, p)) if (not os.path.isabs(p) and _common_cwd) else os.path.normpath(p)
             if norm not in _seen_show:
                 _seen_show.add(norm)
                 deduped_show_paths.append(p)
@@ -590,7 +582,7 @@ if prompt := st.chat_input("Ask anything…"):
         if deduped_show_paths:
             rendered_paths: list[str] = []
             for rel_path in deduped_show_paths:
-                abs_path = os.path.normpath(os.path.join(_cwd, rel_path)) if not os.path.isabs(rel_path) else rel_path
+                abs_path = os.path.normpath(os.path.join(_common_cwd, rel_path)) if (not os.path.isabs(rel_path) and _common_cwd) else rel_path
                 if not os.path.isfile(abs_path):
                     continue
                 rendered_paths.append(abs_path)
@@ -608,19 +600,7 @@ if prompt := st.chat_input("Ask anything…"):
             if rendered_paths:
                 full_response = media_utils.attach_files(full_response, rendered_paths)
 
-        # Plotly: try intercepted paths first, then scan response text + timestamp
-        plotly_cache, plotly_fig, plotly_html_path = None, None, None
-        if plotly_json_paths:
-            for pjp in plotly_json_paths:
-                abs_pjp = os.path.normpath(os.path.join(_cwd, pjp)) if not os.path.isabs(pjp) else pjp
-                if os.path.isfile(abs_pjp):
-                    plotly_cache, plotly_fig, _ = media_utils.try_interactive_plot(
-                        _cwd, f"Saved: {pjp}", since=0,
-                    )
-                    if plotly_fig:
-                        break
-        if not plotly_fig:
-            plotly_cache, plotly_fig, plotly_html_path = media_utils.try_interactive_plot(_cwd, full_response, since=request_start_time)
+        plotly_cache, plotly_fig, plotly_html_path = media_utils.try_interactive_plot(_common_cwd, full_response)
         if plotly_fig:
             st.plotly_chart(plotly_fig, use_container_width=True, key=f"plotly_{int(time.time()*1000)}")
             full_response = media_utils.attach_plotly(full_response, plotly_cache)
@@ -629,9 +609,16 @@ if prompt := st.chat_input("Ask anything…"):
             st.components.v1.html(html_content, height=1200, scrolling=False)
             full_response = media_utils.attach_plotly_html(full_response, plotly_html_path)
         else:
-            new_images = media_utils.find_new_images(
-                settings.get("cwd", ""), request_start_time, full_response,
-            )
+            all_new_images: list[str] = []
+            for _d in (_dirs if _dirs else [_common_cwd] if _common_cwd else []):
+                all_new_images.extend(media_utils.find_new_images(_d, request_start_time, full_response))
+            seen_img: set[str] = set()
+            new_images: list[str] = []
+            for ip in all_new_images:
+                nip = os.path.normpath(ip)
+                if nip not in seen_img:
+                    seen_img.add(nip)
+                    new_images.append(ip)
             for img_path in new_images:
                 st.image(img_path, caption=os.path.basename(img_path))
             if new_images:
@@ -646,9 +633,8 @@ if prompt := st.chat_input("Ask anything…"):
     if full_response:
         db.add_message(conv_id, "assistant", full_response)
 
-    diag_state = memory.extract_state_updates(full_response, diag_state)
     # +2: user message and assistant message we just added (build_prompt used pre-add messages)
-    db.update_memory(conv_id, updated_summary, diag_state.serialize(), new_summary_msg_count + 2)
+    db.update_memory(conv_id, updated_summary, "", new_summary_msg_count + 2)
 
     user_msgs = [m for m in db.get_messages(conv_id) if m["role"] == "user"]
     if len(user_msgs) == 1:
