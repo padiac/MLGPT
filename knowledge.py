@@ -89,8 +89,8 @@ def _run_summarization_worker(conv_id: str, last_message_id: int, cwd: str) -> s
         db.update_liked_status(conv_id, last_message_id, "cancelled")
         return None
 
-    # Write MD file
-    out_dir = Path(cwd or str(ROOT)) / "liked_answers"
+    # Write MD file — always under project root, not under cwd (which may be outside the project)
+    out_dir = ROOT / "liked_answers"
     out_dir.mkdir(parents=True, exist_ok=True)
     ts = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
     conv_info = db.get_conversation(conv_id)
@@ -126,11 +126,13 @@ def start_summarization(conv_id: str, last_message_id: int, cwd: str) -> tuple[b
 
     cwd = cwd or str(ROOT)
     try:
+        env = {**os.environ, "PYTHONIOENCODING": "utf-8", "PYTHONUTF8": "1"}
         proc = subprocess.Popen(
             [sys.executable, "-m", "knowledge", "summarize", conv_id, str(last_message_id), cwd],
             cwd=str(ROOT),
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
+            env=env,
         )
         db.create_liked_entry(conv_id, last_message_id, worker_pid=proc.pid)
         return True, "Saving…"

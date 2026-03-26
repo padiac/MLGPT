@@ -74,11 +74,16 @@ def main():
     result = normalize(text)
 
     if args.output:
-        with open(args.output, "w", encoding="utf-8") as f:
+        with open(args.output, "w", encoding="utf-8", newline="") as f:
             f.write(result)
     else:
-        sys.stdout.reconfigure(encoding="utf-8", errors="replace")
-        sys.stdout.write(result)
+        # On Windows, PowerShell stdout redirection can corrupt UTF-8.
+        # Belt-and-suspenders: force UTF-8 on the binary layer too.
+        if sys.platform == "win32" and hasattr(sys.stdout, "buffer"):
+            sys.stdout.buffer.write(result.encode("utf-8"))
+        else:
+            sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+            sys.stdout.write(result)
 
 
 if __name__ == "__main__":

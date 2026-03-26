@@ -399,7 +399,7 @@ def _messages_with_likes():
                                 st.toast(m)
                                 st.rerun()
                         elif entry["status"] in ("pending", "summarizing"):
-                            if st.button("💾 … ✕", key=f"cancel_{mid}", help="Cancel saving"):
+                            if st.button("⏳", key=f"cancel_{mid}", help="Saving… click to cancel"):
                                 ok, m = knowledge.cancel_or_unlike(conv_id, mid)
                                 st.toast(m)
                                 st.rerun()

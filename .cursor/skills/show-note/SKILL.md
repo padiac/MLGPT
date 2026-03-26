@@ -28,15 +28,19 @@ The notes are authored for GitHub Pages, which uses math syntax that Streamlit's
 
 1. Identify the `.md` file path. It may be relative to one of the knowledge directories.
 
-2. Run the normalization script:
+2. Run the normalization script with the `-o` flag to avoid PowerShell UTF-8 encoding corruption:
 
    ```bash
-   python scripts/normalize_github_math.py "<path-to-file>"
+   python scripts/normalize_github_math.py "<path-to-file>" -o "<temp-output-file>.md"
    ```
 
-   The script prints normalized markdown to stdout. It does **not** modify the original file.
+   Use a temp path like `_normalized_tmp.md` in the repo root. The `-o` flag makes Python write UTF-8 directly, bypassing PowerShell's broken stdout encoding on Windows.
 
-3. Return the script's stdout **directly as your response text** — raw markdown, NOT inside a code block or code fence. The output IS markdown meant to be rendered. Do not wrap it in ``` or any other delimiter.
+   **NEVER** redirect stdout with `>` on Windows PowerShell — it corrupts UTF-8.
+
+3. Read the temp output file with the Read tool, then delete it.
+
+4. Return the file content **directly as your response text** — raw markdown, NOT inside a code block or code fence. The output IS markdown meant to be rendered. Do not wrap it in ``` or any other delimiter.
 
 ## Critical Rule
 
