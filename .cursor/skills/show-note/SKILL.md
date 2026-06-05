@@ -1,56 +1,24 @@
 ---
 name: show-note
-description: "Normalize and display markdown notes. ALWAYS use when you are about to output the full or near-full content of any .md file from the knowledge directories — regardless of how the user phrased the request."
+description: "Display a .md note from the knowledge directories to the user. Use whenever the user wants to view a markdown file's content — phrasings include 'show me X.md', '展示全文', '看一下', '把这篇给我看', 'open it', etc."
 disable-model-invocation: true
 ---
 
-# Show Note (with math normalization)
+# Show Note
 
-## When to Use
+When the user wants to see a `.md` file from the knowledge directories, do **exactly this and nothing else**:
 
-Use this skill **whenever you are about to display the full (or substantially full) content of a `.md` file** from the knowledge directories. This includes but is not limited to:
+1. Locate the absolute path of the requested `.md` file (use Glob if needed).
+2. Run **one** Bash command (no other flags, no `-o`, no `Read` afterwards):
 
-- User gives an explicit path: "show me `notes/foo.md`"
-- User says "展示全文", "显示文档", "把整篇给我看", "display the document"
-- User references a previously found file: "看一下第一篇", "看看那个PCA的", "read the first one", "open it"
-- User says "show me", "let me see", "看一下", "读一下", "打开"
-- **Any situation where you would otherwise use `cat` or `Read` to dump an entire `.md` file as your response**
-
-Do **NOT** use this skill when:
-- Answering Q&A or summarizing (you only quote short excerpts)
-- The file is not `.md` (e.g. PDF — those don't need this normalization)
-
-## Why
-
-The notes are authored for GitHub Pages, which uses math syntax that Streamlit's KaTeX cannot render correctly (e.g. `$ x $` with inner spaces, `\_` for subscripts). The normalization script fixes these without changing other content.
-
-## Instructions
-
-1. Identify the `.md` file path. It may be relative to one of the knowledge directories.
-
-2. Run the normalization script with the `-o` flag to avoid PowerShell UTF-8 encoding corruption:
-
-   ```bash
-   python scripts/normalize_github_math.py "<path-to-file>" -o "<temp-output-file>.md"
+   ```
+   python E:/Repo/MLGPT/scripts/show_file.py "<absolute_path_to.md>"
    ```
 
-   Use a temp path like `_normalized_tmp.md` in the repo root. The `-o` flag makes Python write UTF-8 directly, bypassing PowerShell's broken stdout encoding on Windows.
+3. End your turn **immediately** after the script exits 0. No further text.
 
-   **NEVER** redirect stdout with `>` on Windows PowerShell — it corrupts UTF-8.
+The script normalizes the file's math syntax for the frontend and the app renders it inline. Do **not** paste the file content into your response — the app handles display. A long re-typed response is wasted work; the user already sees the file from step 2.
 
-3. Read the temp output file with the Read tool, then delete it.
+If the file path is ambiguous (multiple matches), pick the most specific match silently — do not ask, just run `show_file.py` on the best guess.
 
-4. Return the file content **directly as your response text** — raw markdown, NOT inside a code block or code fence. The output IS markdown meant to be rendered. Do not wrap it in ``` or any other delimiter.
-
-## Critical Rule
-
-**NEVER** wrap the output in a code fence. The whole point is that the frontend renders the markdown + math. A code fence defeats this entirely.
-
-- **Correct:** paste the normalized markdown directly as your reply text.
-- **Wrong:** wrapping it in ```markdown ... ``` or any code block.
-
-## Important
-
-- **Never modify the original file.** The script is read-only.
-- Only apply to `.md` files from knowledge directories.
-- If the file doesn't exist, tell the user and ask for clarification.
+Use this only for `.md` files in the knowledge directories. For other file types or quick excerpts, answer normally.

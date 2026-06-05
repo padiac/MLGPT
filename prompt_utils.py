@@ -59,31 +59,48 @@ def enrich_prompt(question: str, dirs: list[str] | str = "") -> str:
     return header + question
 
 
-def load_skills(dirs: list[str] | str = "") -> str:
-    """Read `.cursor/skills/**/SKILL.md` from each knowledge directory.
+_MLGPT_ROOT = Path(__file__).resolve().parent
+# Subdirectories under each search root that may hold SKILL.md files.
+# `.cursor/skills/` is Cursor's convention; `.claude/skills/` is Claude Code's.
+# We inline ALL of them into the prompt so skills work identically regardless
+# of which backend (Cursor / Claude) is active — backend-native auto-discovery
+# differs, and Cursor's `.cursor/skills/` is invisible to Claude Code.
+_SKILL_SUBDIRS = (
+    (".cursor", "skills"),
+    (".claude", "skills"),
+)
 
-    Injects skill instructions into the prompt so the CLI agent follows them
-    even when its cwd is a common parent that doesn't contain the skills.
+
+def load_skills(dirs: list[str] | str = "") -> str:
+    """Read every SKILL.md under the MLGPT project root AND each knowledge dir.
+
+    Searches `.cursor/skills/**/SKILL.md` and `.claude/skills/**/SKILL.md` so
+    project-level skills (like show-note) apply to both backends regardless of
+    where the agent's cwd ends up.
     """
     if isinstance(dirs, str):
         dirs = [dirs] if dirs else []
+    # MLGPT root is always searched (it owns project-level skills); knowledge
+    # dirs are also searched (for user-authored per-corpus skills).
+    roots = [_MLGPT_ROOT, *[Path(d) for d in dirs if d]]
     parts: list[str] = []
     seen: set[str] = set()
-    for d in dirs:
-        skills_dir = Path(d) / ".cursor" / "skills"
-        if not skills_dir.is_dir():
-            continue
-        for f in sorted(skills_dir.glob("**/SKILL.md")):
-            norm = str(f.resolve())
-            if norm in seen:
+    for root in roots:
+        for subdir in _SKILL_SUBDIRS:
+            skills_dir = root.joinpath(*subdir)
+            if not skills_dir.is_dir():
                 continue
-            seen.add(norm)
-            try:
-                text = f.read_text(encoding="utf-8").strip()
-                if text:
-                    parts.append(text)
-            except OSError:
-                continue
+            for f in sorted(skills_dir.glob("**/SKILL.md")):
+                norm = str(f.resolve())
+                if norm in seen:
+                    continue
+                seen.add(norm)
+                try:
+                    text = f.read_text(encoding="utf-8").strip()
+                    if text:
+                        parts.append(text)
+                except OSError:
+                    continue
     return "\n\n".join(parts)
 
 

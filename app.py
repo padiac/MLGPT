@@ -20,7 +20,7 @@ ROOT = Path(__file__).resolve().parent
 
 import streamlit as st
 
-import cursor_cli
+import backends
 import db
 import knowledge
 import memory
@@ -38,7 +38,8 @@ def _default_dirs() -> list[str]:
 
 DEFAULT_DIRS: list[str] = _default_dirs()
 
-DEFAULT_MODEL = "composer-2"
+DEFAULT_BACKEND = backends.DEFAULT_BACKEND
+DEFAULT_MODEL = backends.DEFAULT_MODELS[DEFAULT_BACKEND]
 # Older app versions defaulted to Opus; DB still has that string — migrate to current default.
 LEGACY_DEFAULT_MODELS = ("claude-4.6-opus-high-thinking",)
 DEFAULT_MODE = "agent"
@@ -77,7 +78,7 @@ def get_client_ip() -> str:
 
 if "_streaming_proc" in st.session_state:
     proc = st.session_state.pop("_streaming_proc")
-    cursor_cli.kill_process(proc)
+    backends.kill_process(proc)
 
     partial = st.session_state.pop("_partial_response", "")
     cid = st.session_state.pop("_streaming_conv_id", None)
@@ -125,19 +126,24 @@ client_ip = get_client_ip()
 # Load settings from DB (persists across page refresh); fallback to defaults
 if "settings" not in st.session_state:
     defaults = {
+        "backend": DEFAULT_BACKEND,
         "model": DEFAULT_MODEL,
         "mode": DEFAULT_MODE,
         "cwd": list(DEFAULT_DIRS),
     }
     saved = db.get_user_settings(client_ip)
     if saved:
+        b = saved.get("backend") or defaults["backend"]
+        if b not in backends.BACKENDS:
+            b = defaults["backend"]
         merged = {
-            "model": saved.get("model") or defaults["model"],
+            "backend": b,
+            "model": saved.get("model") or backends.DEFAULT_MODELS.get(b, DEFAULT_MODEL),
             "mode": saved.get("mode") or defaults["mode"],
             "cwd": saved.get("cwd") or defaults["cwd"],
         }
         if merged["model"] in LEGACY_DEFAULT_MODELS:
-            merged["model"] = DEFAULT_MODEL
+            merged["model"] = backends.DEFAULT_MODELS.get(b, DEFAULT_MODEL)
             db.save_user_settings(client_ip, merged)
         st.session_state.settings = merged
     else:
@@ -256,12 +262,41 @@ In any conversation, type **"add this to usage example"** to save the thread her
 """)
 
     with st.expander("⚙  Settings"):
-        if "_model_options" not in st.session_state:
-            pairs = cursor_cli.get_available_models()
+        # ── Backend selector ──────────────────────────────────────────────
+        _backend_options = backends.list_backends()
+        _backend_ids = [bid for bid, _ in _backend_options]
+        _backend_labels = [label for _, label in _backend_options]
+        _cur_backend = st.session_state.settings.get("backend", DEFAULT_BACKEND)
+        if _cur_backend not in _backend_ids:
+            _cur_backend = DEFAULT_BACKEND
+        _b_idx = _backend_ids.index(_cur_backend)
+        _b_sel = st.selectbox("Backend", _backend_labels, index=_b_idx, help="Which CLI to use as the LLM backend.")
+        _new_backend = _backend_ids[_backend_labels.index(_b_sel)]
+        if _new_backend != _cur_backend:
+            # Backend changed — clear model option cache and migrate model id
+            # to the new backend's default if the old one isn't valid there.
+            st.session_state.pop("_model_options", None)
+            st.session_state.pop("_model_options_backend", None)
+            st.session_state.settings["backend"] = _new_backend
+            new_models = backends.get_available_models(_new_backend)
+            new_ids = {mid for mid, _ in new_models}
+            if st.session_state.settings.get("model") not in new_ids:
+                st.session_state.settings["model"] = backends.DEFAULT_MODELS.get(_new_backend, DEFAULT_MODEL)
+            db.save_user_settings(client_ip, st.session_state.settings)
+            st.rerun()
+
+        # ── Model selector (backend-aware) ────────────────────────────────
+        if (
+            "_model_options" not in st.session_state
+            or st.session_state.get("_model_options_backend") != _new_backend
+        ):
+            pairs = backends.get_available_models(_new_backend)
             if pairs:
                 st.session_state._model_options = pairs
             else:
-                st.session_state._model_options = [(DEFAULT_MODEL, DEFAULT_MODEL)]
+                fallback_model = backends.DEFAULT_MODELS.get(_new_backend, DEFAULT_MODEL)
+                st.session_state._model_options = [(fallback_model, fallback_model)]
+            st.session_state._model_options_backend = _new_backend
 
         _model_ids = [mid for mid, _ in st.session_state._model_options]
         _model_labels = [f"{display}  ({mid})" for mid, display in st.session_state._model_options]
@@ -278,7 +313,7 @@ In any conversation, type **"add this to usage example"** to save the thread her
         )
         st.markdown("**Knowledge directories**")
         st.caption(
-            "Each folder is part of the knowledge base. The Cursor agent cwd is the common parent of these paths."
+            "Each folder is part of the knowledge base. The agent cwd is the common parent of these paths."
         )
 
         _cur_dirs: list[str] = st.session_state.settings.get("cwd", [])
@@ -395,7 +430,10 @@ def _messages_with_likes():
                     with btn_col1:
                         if not entry:
                             if st.button("💾", key=f"like_{mid}", help="Save to knowledge base", type="secondary"):
-                                ok, m = knowledge.start_summarization(conv_id, mid, cwd)
+                                ok, m = knowledge.start_summarization(
+                                    conv_id, mid, cwd,
+                                    backend=st.session_state.settings.get("backend", DEFAULT_BACKEND),
+                                )
                                 st.toast(m)
                                 st.rerun()
                         elif entry["status"] in ("pending", "summarizing"):
@@ -513,7 +551,8 @@ if prompt := st.chat_input("Ask anything…"):
     request_start_time = time.time()
 
     # Start the CLI process (cwd = common parent of all knowledge dirs)
-    process, proc_err = cursor_cli.create_process(
+    process, proc_err = backends.create_process(
+        backend=settings.get("backend", DEFAULT_BACKEND),
         prompt=enriched,
         cwd=_common_cwd or None,
         model=settings.get("model") or None,
@@ -542,7 +581,7 @@ if prompt := st.chat_input("Ask anything…"):
 
         stop_area.button("⏹ Stop", key="stop_gen", type="secondary")
 
-        for evt_type, payload in cursor_cli.iter_events(process):
+        for evt_type, payload in backends.iter_events(process):
             if evt_type == "text":
                 full_response += payload
                 st.session_state._partial_response = full_response
@@ -593,10 +632,26 @@ if prompt := st.chat_input("Ask anything…"):
                     raw = Path(abs_path).read_text(encoding="utf-8", errors="ignore")
                     name = os.path.basename(abs_path)
                     is_config = media_utils._is_config_file(abs_path)
-                    with st.expander(f"📄 {name}", expanded=not is_config):
-                        if abs_path.lower().endswith(".json"):
+                    is_md = abs_path.lower().endswith(".md")
+                    if is_md:
+                        # show-note path: render the file INLINE as markdown
+                        # so headings and math render. Prefer the script-
+                        # normalized sibling <input>.shown.md if scripts/
+                        # show_file.py produced it (math/underscore fixes).
+                        shown = abs_path[:-3] + ".shown.md"
+                        if os.path.isfile(shown):
+                            try:
+                                raw = Path(shown).read_text(encoding="utf-8", errors="ignore")
+                                # Render the script's polished version, not the original.
+                                rendered_paths[-1] = shown
+                            except OSError:
+                                pass
+                        st.markdown(raw, unsafe_allow_html=False)
+                    elif abs_path.lower().endswith(".json"):
+                        with st.expander(f"📄 {name}", expanded=not is_config):
                             st.json(json.loads(raw))
-                        else:
+                    else:
+                        with st.expander(f"📄 {name}", expanded=not is_config):
                             st.code(raw[:50000], language=media_utils.lang_for_file(name))
                 except (json.JSONDecodeError, OSError):
                     pass

@@ -46,10 +46,10 @@ def _build_conversation_text(messages: list[dict]) -> str:
     return "\n\n".join(parts) if parts else "(empty)"
 
 
-def _run_summarization_worker(conv_id: str, last_message_id: int, cwd: str) -> str | None:
+def _run_summarization_worker(conv_id: str, last_message_id: int, cwd: str, backend: str = "cursor") -> str | None:
     """Run summarization in this process. Returns file_path on success, None on failure."""
     import db
-    import cursor_cli
+    import backends
 
     entry = db.get_liked_entry(conv_id, last_message_id)
     if not entry or entry["status"] not in ("pending", "summarizing"):
@@ -63,7 +63,8 @@ def _run_summarization_worker(conv_id: str, last_message_id: int, cwd: str) -> s
     conv_text = _build_conversation_text(messages)
     prompt = _SUMMARIZE_PROMPT.format(conversation=conv_text)
 
-    process, err = cursor_cli.create_process(
+    process, err = backends.create_process(
+        backend=backend,
         prompt=prompt,
         cwd=cwd or str(ROOT),
         model=None,
@@ -75,7 +76,7 @@ def _run_summarization_worker(conv_id: str, last_message_id: int, cwd: str) -> s
         return None
 
     full_response = ""
-    for evt_type, payload in cursor_cli.iter_events(process):
+    for evt_type, payload in backends.iter_events(process):
         if evt_type == "text":
             full_response += payload
         elif evt_type == "text_replace":
@@ -110,10 +111,11 @@ def _run_summarization_worker(conv_id: str, last_message_id: int, cwd: str) -> s
     return str(file_path)
 
 
-def start_summarization(conv_id: str, last_message_id: int, cwd: str) -> tuple[bool, str]:
+def start_summarization(conv_id: str, last_message_id: int, cwd: str, backend: str = "cursor") -> tuple[bool, str]:
     """Spawn background subprocess for summarization.
 
     Returns (success, message). On success, subprocess runs independently.
+    The backend (cursor|claude) is passed to the worker as the 6th arg.
     """
     import db
 
@@ -128,7 +130,7 @@ def start_summarization(conv_id: str, last_message_id: int, cwd: str) -> tuple[b
     try:
         env = {**os.environ, "PYTHONIOENCODING": "utf-8", "PYTHONUTF8": "1"}
         proc = subprocess.Popen(
-            [sys.executable, "-m", "knowledge", "summarize", conv_id, str(last_message_id), cwd],
+            [sys.executable, "-m", "knowledge", "summarize", conv_id, str(last_message_id), cwd, backend],
             cwd=str(ROOT),
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
@@ -177,9 +179,10 @@ if __name__ == "__main__":
         conv_id = sys.argv[2]
         last_message_id = int(sys.argv[3])
         cwd = sys.argv[4]
+        backend = sys.argv[5] if len(sys.argv) >= 6 else "cursor"
 
         try:
-            path = _run_summarization_worker(conv_id, last_message_id, cwd)
+            path = _run_summarization_worker(conv_id, last_message_id, cwd, backend)
             if path:
                 db.update_liked_status(conv_id, last_message_id, "completed", file_path=path)
             else:

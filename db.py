@@ -122,6 +122,11 @@ def init_db():
             conn.execute("ALTER TABLE user_settings DROP COLUMN mdc_tag")
         except sqlite3.OperationalError:
             pass
+        # Add `backend` column for the cursor/claude switcher (2026-06-04).
+        try:
+            conn.execute("ALTER TABLE user_settings ADD COLUMN backend TEXT")
+        except sqlite3.OperationalError:
+            pass  # column already exists
 
         # Shared usage examples — visible to all users
         conn.executescript("""
@@ -148,7 +153,7 @@ def get_user_settings(ip_address: str) -> dict | None:
     """
     with get_conn() as conn:
         row = conn.execute(
-            "SELECT model, mode, cwd FROM user_settings WHERE ip_address = ?",
+            "SELECT model, mode, cwd, backend FROM user_settings WHERE ip_address = ?",
             (ip_address,),
         ).fetchone()
     if not row:
@@ -189,18 +194,20 @@ def save_user_settings(ip_address: str, settings: dict) -> None:
     cwd_str = _encode_cwd(cwd_val) if isinstance(cwd_val, list) else _encode_cwd([cwd_val])
     with get_conn() as conn:
         conn.execute(
-            """INSERT INTO user_settings (ip_address, model, mode, cwd, updated_at)
-               VALUES (?, ?, ?, ?, ?)
+            """INSERT INTO user_settings (ip_address, model, mode, cwd, backend, updated_at)
+               VALUES (?, ?, ?, ?, ?, ?)
                ON CONFLICT(ip_address) DO UPDATE SET
                    model = excluded.model,
                    mode = excluded.mode,
                    cwd = excluded.cwd,
+                   backend = excluded.backend,
                    updated_at = excluded.updated_at""",
             (
                 ip_address,
                 settings.get("model", ""),
                 settings.get("mode", "agent"),
                 cwd_str,
+                settings.get("backend", ""),
                 now,
             ),
         )

@@ -297,9 +297,23 @@ def _render_files(paths: list[str]) -> None:
         try:
             raw = Path(path).read_text(encoding="utf-8", errors="replace")
             name = os.path.basename(path)
+            lower = path.lower()
+            # .md attachments (show-note flow): render INLINE as markdown so
+            # KaTeX math and headings show — not as a collapsed code block.
+            # Prefer the script-normalized sibling <input>.shown.md if it
+            # exists (scripts/show_file.py writes it).
+            if lower.endswith(".md"):
+                shown = path[:-3] + ".shown.md"
+                if os.path.isfile(shown):
+                    try:
+                        raw = Path(shown).read_text(encoding="utf-8", errors="replace")
+                    except OSError:
+                        pass
+                st.markdown(raw, unsafe_allow_html=False)
+                continue
             expanded = not _is_config_file(path)
             with st.expander(f"📄 {name}", expanded=expanded):
-                if path.lower().endswith(".json"):
+                if lower.endswith(".json"):
                     try:
                         st.json(json.loads(raw))
                     except json.JSONDecodeError:
